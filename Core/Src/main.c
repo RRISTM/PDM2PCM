@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "pdm2pcm.h"
+#include "pcm2pdm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,28 +37,37 @@
 #define PDM_START 0x08100000
 #define PDM_LENGTH 0x00100000
 
+#define PCM_START 0x08100000
+#define PCM_LENGTH 0x00100000
+#define OVERSAMPLE 64
+
 //output buffer buffer step in bytes
-#define STEP_OUT 48*2
+#define STEP_OUT (48*2)
 // input buffer in bytes 48samples * 64 decimation / 8bits
-#define STEP_IN  (48*64/8)
+#define STEP_IN  (48*OVERSAMPLE/8)
 
 
 //PDM length * 8bits / decimation
-#define PCM_LENGTH (PDM_LENGTH*8/64*2)
+
+#define PCM_BUFFER_SIZE ( 512*1024)
+#define PCM_LENGTH (PDM_LENGTH*8/OVERSAMPLE*2)
+
 
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-uint8_t pcm_buffer[PCM_LENGTH + 0x100]; //0x100 tesiting margin 
+uint8_t pcm_buffer[PCM_BUFFER_SIZE + 0x100]; //0x100 tesiting margin
 
 extern PDM_Filter_Handler_t PDM1_filter_handler;
 
 uint32_t input_ptr = 0;
 uint32_t output_ptr =0;
-uint32_t i;
+volatile uint32_t i;
+volatile uint32_t max;
 uint32_t ret_val;
+uint8_t pdmTemp[(OVERSAMPLE/8)*(STEP_OUT/2)+0x100];
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -71,6 +81,7 @@ CRC_HandleTypeDef hcrc;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_CRC_Init(void);
+static void MX_ICACHE_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -108,15 +119,16 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_CRC_Init();
+  MX_ICACHE_Init();
   /* USER CODE BEGIN 2 */
   MX_PDM2PCM_Init();
-
-  for (i = 0; i < (PDM_LENGTH / STEP_IN); i++)
+  max = (PCM_BUFFER_SIZE / STEP_OUT);
+  for (i = 0; i < (PCM_BUFFER_SIZE / STEP_OUT); i++)
   {
+    pcm2pdm((uint8_t *)(PDM_START + input_ptr),pdmTemp,(STEP_OUT/2),OVERSAMPLE);
+    ret_val = PDM_Filter(pdmTemp, (uint8_t *)&pcm_buffer[output_ptr], &PDM1_filter_handler);
 
-    ret_val = PDM_Filter((uint8_t *)(PDM_START + input_ptr), &pcm_buffer[output_ptr], &PDM1_filter_handler);
-
-    input_ptr += STEP_IN;
+    input_ptr += STEP_OUT;
     output_ptr += STEP_OUT;
   }
   /* USER CODE END 2 */
@@ -144,7 +156,7 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE4) != HAL_OK)
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -155,7 +167,16 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_4;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+  RCC_OscInitStruct.PLL.PLLMBOOST = RCC_PLLMBOOST_DIV1;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 80;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLLVCIRANGE_0;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -166,13 +187,13 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_PCLK3;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -206,6 +227,38 @@ static void MX_CRC_Init(void)
   /* USER CODE BEGIN CRC_Init 2 */
 
   /* USER CODE END CRC_Init 2 */
+
+}
+
+/**
+  * @brief ICACHE Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ICACHE_Init(void)
+{
+
+  /* USER CODE BEGIN ICACHE_Init 0 */
+
+  /* USER CODE END ICACHE_Init 0 */
+
+  /* USER CODE BEGIN ICACHE_Init 1 */
+
+  /* USER CODE END ICACHE_Init 1 */
+
+  /** Enable instruction cache in 1-way (direct mapped cache)
+  */
+  if (HAL_ICACHE_ConfigAssociativityMode(ICACHE_1WAY) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_ICACHE_Enable() != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ICACHE_Init 2 */
+
+  /* USER CODE END ICACHE_Init 2 */
 
 }
 
